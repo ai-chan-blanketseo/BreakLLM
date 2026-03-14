@@ -119,8 +119,9 @@ export function Chat() {
       addMessage({ role: "system", content: ">> Submitting attempt on-chain…" });
 
       // messageHash = keccak256(message + random nonce) — prevents replay
+      // The nonce is also sent to the backend so it can verify the event matches
       const nonce = crypto.randomUUID();
-      const messageHash = keccak256(encodePacked(["string", "string"], [message, nonce]));
+      const messageHash = keccak256(encodePacked(["string", "string"], [message.trim(), nonce]));
 
       const attemptTx = await submitAttempt({
         address: CONTRACT_ADDRESS,
@@ -144,9 +145,10 @@ export function Chat() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message,
+          message: message.trim(),
           txHash: attemptTx,
           userAddress: address,
+          nonce, // backend uses this to verify the AttemptSubmitted event
         }),
       });
 

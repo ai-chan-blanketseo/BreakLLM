@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createPublicClient, http, type Address, type Hash } from "viem";
+import { createPublicClient, http, type Address, type Hash, keccak256, encodePacked } from "viem";
 import { base, baseSepolia } from "viem/chains";
-import { CONTRACT_ADDRESS } from "@/lib/contract";
+import { CONTRACT_ADDRESS, BREAK_LLM_ABI } from "@/lib/contract";
 import { getLLMClient, getSystemPrompt, LLM_MODEL } from "@/lib/llm";
 
 const chainId = parseInt(process.env.NEXT_PUBLIC_CHAIN_ID ?? "84532");
@@ -17,7 +17,7 @@ const publicClient = createPublicClient({
 const usedTxHashes = new Set<string>();
 
 export async function POST(req: NextRequest) {
-  let body: { message?: string; txHash?: string; userAddress?: string };
+  let body: { message?: string; txHash?: string; userAddress?: string; nonce?: string };
 
   try {
     body = await req.json();
@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { message, txHash, userAddress } = body;
+  const { message, txHash, userAddress, nonce } = body;
 
   // ── Input validation ───────────────────────────────────────────────────────
   if (!message || typeof message !== "string" || message.trim().length === 0) {
@@ -36,6 +36,9 @@ export async function POST(req: NextRequest) {
   }
   if (!userAddress || !/^0x[0-9a-fA-F]{40}$/.test(userAddress)) {
     return NextResponse.json({ error: "valid userAddress is required" }, { status: 400 });
+  }
+  if (!nonce || typeof nonce !== "string") {
+    return NextResponse.json({ error: "nonce is required" }, { status: 400 });
   }
 
   const normalizedTxHash = txHash.toLowerCase();
@@ -80,6 +83,42 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       { error: "Transaction is not yet confirmed. Please wait for it to mine." },
       { status: 202 }
+    );
+  }
+
+  // ── Verify the AttemptSubmitted event matches this exact message+nonce ─────
+  // This prevents someone from paying for one message then calling the API
+  // with a completely different message using the same txHash.
+  const expectedMessageHash = keccak256(
+    encodePacked(["string", "string"], [message.trim(), nonce])
+  );
+
+  try {
+    const logs = await publicClient.getContractEvents({
+      address: CONTRACT_ADDRESS as Address,
+      abi: BREAK_LLM_ABI,
+      eventName: "AttemptSubmitted",
+      fromBlock: tx.blockNumber,
+      toBlock: tx.blockNumber,
+    });
+
+    const matchingEvent = logs.find(
+      (log) =>
+        log.transactionHash?.toLowerCase() === normalizedTxHash &&
+        (log.args as { player?: string }).player?.toLowerCase() === userAddress.toLowerCase() &&
+        (log.args as { messageHash?: string }).messageHash === expectedMessageHash
+    );
+
+    if (!matchingEvent) {
+      return NextResponse.json(
+        { error: "No matching AttemptSubmitted event found for this message" },
+        { status: 403 }
+      );
+    }
+  } catch {
+    return NextResponse.json(
+      { error: "Failed to verify on-chain event" },
+      { status: 500 }
     );
   }
 
